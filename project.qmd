@@ -1,0 +1,591 @@
+---
+title: "Simulating and Analyzing the Effect of the Seeding System
+        (2024	US Open Tennis Tournament)"
+format: pdf
+author: "Carol Jiang"
+---
+
+```{r,message=FALSE,warning=FALSE}
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Load the data file
+att2024 <- read_excel("C:\\Users\\10485\\Desktop\\2024 Fall\\Modeling and Simulation\\Project\\2024.xlsx")
+single_man <- read.csv("C:\\Users\\10485\\Desktop\\2024 Fall\\Modeling and Simulation\\Project\\usopen2024.csv")
+```
+
+```{r,message=FALSE,warning=FALSE}
+#select threatening unseeded players who are the top 10 of unseeded players winning the seeded players in 2024, and assign them as in the us2024 player list
+us_seed <- single_man$player[!is.na(single_man$seed)]
+Threatening_unseeded_player <- att2024 %>% 
+  filter(Loser %in% us_seed & !(Winner %in% us_seed)) %>%  
+  select(Loser, Winner) %>%                               
+  group_by(Winner) %>%                                    
+  summarize(count = n()) %>%                              
+  arrange(-count) %>% head(10)
+Threatening_unseeded_player
+single_man <- single_man %>%
+   mutate(Key = if_else(player %in% Threatening_unseeded_player$Winner, "Threat", Key)) %>% 
+   mutate(Key = if_else((Key == ""), "other_player", Key))
+
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Calculate the probability for the meeting different types of opponents
+#For seeded players
+pro_seed32 <- single_man %>%
+  group_by(Key) %>% 
+  summarize(count = n(), avg_ranking = ceiling(mean(rank))) %>%
+  filter(!grepl("seed", Key)) %>% 
+  mutate(pro = round(count / 96, 2))
+pro_seed32
+
+#For unseeded players
+pro_unseed32_1 <- single_man %>%
+  group_by(Key) %>% 
+  summarize(count = n(),avg_ranking = ceiling(mean(rank))) %>%
+  filter(grepl("seed", Key)) %>% 
+  mutate(pro = round(count / 127, 2))
+
+pro_unseed32_2 <- single_man %>%
+  group_by(Key) %>% 
+  summarize(count = n(),avg_ranking = ceiling(mean(rank))) %>%
+  filter(!grepl("seed", Key)) %>% 
+  mutate(pro = round((sum(count)-1) / 127, 2))%>% 
+  mutate(Key="unseed_players",count=sum(count),avg_ranking=mean(avg_ranking),pro=pro) %>% head(1)
+
+pro_unseed32 <-  rbind(pro_unseed32_1, pro_unseed32_2)
+pro_unseed32
+```
+
+```{r,message=FALSE,warning=FALSE}
+#function for the process of US open draw
+f_draw32 <- function() {
+  draw <- as.vector(rep(NA,128))
+  
+  #For No1 and No2 seeds
+  draw[1] <- single_man$player[single_man$seed==1]
+  draw[128] <- single_man$player[single_man$seed==2]
+  #For No3 and No4 seeds
+  third_and_fourth_positions <- sample(c(33, 96), 2)
+  draw[third_and_fourth_positions[1]] <- single_man$player[single_man$seed==3]
+  draw[third_and_fourth_positions[2]] <- single_man$player[single_man$seed==4]
+
+  #For No5 and No8 seeds
+  fifth_to_eighth_positions <- sample(c(32, 64, 65, 97), 4)  
+  for (i in 1:4) {
+    draw[fifth_to_eighth_positions[i]] <- single_man$player[single_man$seed==(i+4)]
+  }
+
+  #For No9 and No16 seeds
+  ninth_to_sixteenth_positions <- sample(c(16,17,48,49,80,81,112,113), 8)
+  for (i in 1:8) {
+    draw[ninth_to_sixteenth_positions[i]] <- single_man$player[single_man$seed==(i+8)]
+  }
+
+  #For No17 and No32 seeds
+  seventeenth_to_thirtysecond_positions <- sample(c(8,9,24,25,40,41,56,57,72,73,88,89,104,105,120,121), 16)
+  for (i in 1:16) {
+    draw[seventeenth_to_thirtysecond_positions[i]] <- single_man$player[single_man$seed==(i+16)]
+  }
+
+  #For the rest no-seeding players
+  non_seed_positions <- which(is.na(draw))
+  non_seeds <- single_man$player[is.na(single_man$seed)]
+  for (i in 1:length(non_seed_positions)) {
+    draw[non_seed_positions[i]] <- non_seeds[i]
+  }
+  
+  #The first round result
+  result <- split(draw, ceiling(seq_along(1:128)/2))
+  #first_round <- bind_rows(lapply(result, function(x) data.frame(player1 = x[1], player2 = x[2])))
+  #print(first_round)
+  return(result)
+}
+```
+
+```{r,message=FALSE,warning=FALSE}
+#implement drawing simulation function 10 times
+set.seed(18)
+draw_n <- 10
+draw <- replicate(draw_n, f_draw32(), simplify = FALSE)
+draw <- as.data.frame(unlist(draw))
+colnames(draw) <- c("player")
+draw$test <- rep(1:draw_n, each = 128) 
+draw <- left_join(draw, single_man, by= "player") %>% select(player,seed,points,test)
+head(draw,128)
+```
+
+```{r,message=FALSE,warning=FALSE}
+#initial the probability of winning 
+calc_wp <- function(x, y, e) {
+  x <- as.numeric(x)
+  y <- as.numeric(y)
+  return((x^e) / ((x^e) + (y^e)))
+}
+```
+
+```{r,message=FALSE,warning=FALSE}
+#simulation function for the the first round of match
+find_round_winners <- function(round_players, point_dict, e) {
+  next_round <- c()
+  round_matches <- length(round_players) / 2
+  for (i in seq(1, round_matches)) {
+    j <- (i - 1) * 2 + 1
+    player_one <- round_players[j]
+    player_two <- round_players[j + 1]
+    one_wp <- calc_wp(point_dict[which(round_players == player_one)], point_dict[which(round_players == player_two)], e)
+    if (runif(1) < one_wp) {
+      winner <- player_one
+    } else {
+      winner <- player_two
+    }
+    next_round <- c(next_round, winner)
+  }
+  return(next_round)
+}
+```
+
+```{r,message=FALSE,warning=FALSE}
+#implement the simulation 
+set.seed(18)
+result_list <- list()
+
+e <- 1.5
+sims <- 10000
+
+blank_results <- c("64" = 0,"32" = 0,"16" = 0,"8" = 0, "4" = 0, "2" = 0, "1" = 0)
+
+
+for (test_num in 1:draw_n) {
+
+  test_players <- draw[draw$test == test_num, ]
+  first_round <- test_players$player
+  
+
+  point_dict <- setNames(as.numeric(test_players$points), test_players$Player)
+  
+
+  test_result_dict <- list()
+  for (i in first_round) {
+    test_result_dict[[i]] <- blank_results
+  }
+  
+
+  for (x in 1:sims) {
+    next_round <- first_round
+    while (TRUE) {
+      next_round <- find_round_winners(next_round, point_dict, e)
+      n <- length(next_round)
+      for (p in next_round) {
+        test_result_dict[[p]][as.character(n)] <- test_result_dict[[p]][as.character(n)] + 1
+      }
+      if (n == 1) break
+    }
+  }
+  
+
+  result_list[[paste("Test", test_num)]] <- test_result_dict
+}
+
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Calculate the probability for every players winning in every round.
+result_table <- data.frame(Player = character(), Seeds=numeric(),Key = character(),Points = numeric(), R64 = numeric(), R32 = numeric(), R16 = numeric(), QF = numeric(), SF = numeric(), Final = numeric(), Winnner = numeric())
+
+  for (pl in first_round) {
+    R64 <- c()
+    R32 <- c()
+    R16 <- c()
+    QF <- c()
+    SF <- c()
+    Final <- c()
+    Winner <- c()
+    
+      for (i in 1:draw_n) {
+      sub_result <- result_list[[i]]
+      
+      R64[i] <- sub_result[[pl]]["64"] / sims
+      R32[i] <- sub_result[[pl]]["32"] / sims
+      R16[i] <- sub_result[[pl]]["16"] / sims
+      QF[i] <- sub_result[[pl]]["8"] / sims
+      SF[i] <- sub_result[[pl]]["4"] / sims
+      Final[i] <- sub_result[[pl]]["2"] / sims
+      Winner[i] <- sub_result[[pl]]["1"] / sims
+      
+      }
+    
+    index <- which(single_man$player == pl)
+    row <- data.frame( Player = pl,
+             Seeds = single_man$seed[index],
+             Key = single_man$Key[index],
+             Points = single_man$points[index],  
+             R64 = mean(R64),
+             R32 = mean(R32),
+             R16 = mean(R16),
+             QF = mean(QF),
+             SF = mean(SF),
+             Final = mean(Final),
+             Winner = mean(Winner))
+   result_table <- rbind(result_table, row)
+    
+  }  
+
+
+```
+
+```{r,message=FALSE,warning=FALSE}
+#summarize the result of probability for key 
+key32 <- result_table %>%
+  group_by(Key) %>%
+  summarise(
+    R64 = mean(R64, na.rm = TRUE),
+    R32 = mean(R32, na.rm = TRUE),
+    R16 = mean(R16, na.rm = TRUE),
+    QF = mean(QF, na.rm = TRUE),
+    SF = mean(SF, na.rm = TRUE),
+    Final = mean(Final, na.rm = TRUE),
+    Winner = mean(Winner, na.rm = TRUE)
+  )
+
+key32
+```
+
+```{r,message=FALSE,warning=FALSE}
+#summarize the result of top 1 seeded players
+key32_top1 <- result_table %>%
+  filter(Player=="Sinner J.") 
+
+key32_top1 
+```
+
+```{r,message=FALSE,warning=FALSE}
+#I changed 32 seeds to 16 seeds to see how the effect is
+us_seed2 <- single_man$player[!is.na(single_man$seed) & single_man$seed <= 16]
+
+Threatening_unseeded_player2 <- att2024 %>% 
+  filter(Loser %in% us_seed2 & !(Winner %in% us_seed2)) %>%  
+  select(Loser, Winner) %>%                               
+  group_by(Winner) %>%                                    
+  summarize(count = n()) %>%                              
+  arrange(-count) %>% head(10)
+
+Threatening_unseeded_player2
+
+single_man2 <- single_man %>%
+  mutate(Key = if_else(Key == "Threat", "", Key)) %>%
+  mutate(Key = if_else(Key == "seed17-32", "", Key)) %>%
+  mutate(Key = if_else(player %in% Threatening_unseeded_player2$Winner, "Threat", Key)) %>%
+  mutate(Key = if_else(Key == "", "other_player", Key)) %>% 
+  mutate(seed = if_else(seed>=17,NA,seed))
+ 
+   
+   
+```
+
+```{r,message=FALSE,warning=FALSE}
+#For seeded players
+pro_seed16 <- single_man2 %>%
+  group_by(Key) %>% 
+  summarize(count = n(), avg_ranking = ceiling(mean(rank))) %>%
+  filter(!grepl("seed", Key)) %>% 
+  mutate(pro = round(count / 112, 2))
+pro_seed16
+
+#For unseeded players
+pro_unseed16_1 <- single_man2 %>%
+  group_by(Key) %>% 
+  summarize(count = n(),avg_ranking = ceiling(mean(rank))) %>%
+  filter(grepl("seed", Key)) %>% 
+  mutate(pro = round(count / 127, 2))
+
+pro_unseed16_2 <- single_man2 %>%
+  group_by(Key) %>% 
+  summarize(count = n(),avg_ranking = ceiling(mean(rank))) %>%
+  filter(!grepl("seed", Key)) %>% 
+  mutate(pro = round((sum(count)-1) / 127, 2))%>% 
+  mutate(Key="unseed_players",count=sum(count),avg_ranking=ceiling(mean(avg_ranking)),pro=pro) %>% head(1)
+
+pro_unseed16 <-  rbind(pro_unseed16_1, pro_unseed16_2)
+pro_unseed16
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Visualization of Comparison of Player Probabilities by Group and System
+pro_seed32$Group <- "Seeded Players"
+pro_unseed32$Group <- "Unseeded Players"
+pro_seed32$System <- "32 seeds"
+pro_unseed32$System <- "32 seeds"
+pro_seed16$Group <- "Seeded Players"
+pro_unseed16$Group <- "Unseeded Players"
+pro_seed16$System <- "16 seeds"
+pro_unseed16$System <- "16 seeds"
+
+combined_data <- rbind(pro_seed32, pro_unseed32,pro_seed16,pro_unseed16)
+
+combined_data <- combined_data %>%
+  arrange(Group, desc(pro), avg_ranking) %>% 
+  mutate(Key = factor(Key, levels = unique(Key))) 
+
+ggplot(combined_data, aes(x = Key, y = pro, fill = System)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7) + 
+  geom_text(aes(label = round(pro, 2)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 2) + 
+  facet_wrap(~Group, scales = "free_x") +
+  labs(title = "Comparison of Player Probabilities by Group and System",
+       x = "Player Category", y = "Probability") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Visualization of Comparison of Opponents ranking by Group and System
+ggplot(combined_data, aes(x = Key, y = avg_ranking, fill = System)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7) + 
+  geom_text(aes(label = avg_ranking), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 2) + 
+  facet_wrap(~Group, scales = "free_x") +
+  labs(title = "Comparison of Opponents ranking by Group and System",
+       x = "Player Category", y = "Average ranking") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r,message=FALSE,warning=FALSE}
+#function for the process of US open draw in 16 seeds system
+f_draw16 <- function() {
+  draw2 <- as.vector(rep(NA,128))
+  
+  #For No1 and No2 seeds
+  draw2[1] <- single_man2$player[single_man2$seed==1]
+  draw2[128] <- single_man2$player[single_man2$seed==2]
+  #For No3 and No4 seeds
+  third_and_fourth_positions <- sample(c(33, 96), 2)
+  draw2[third_and_fourth_positions[1]] <- single_man2$player[single_man2$seed==3]
+  draw2[third_and_fourth_positions[2]] <- single_man2$player[single_man2$seed==4]
+
+  #For No5 and No8 seeds
+  fifth_to_eighth_positions <- sample(c(32, 64, 65, 97), 4)  
+  for (i in 1:4) {
+    draw2[fifth_to_eighth_positions[i]] <- single_man2$player[single_man2$seed==(i+4)]
+  }
+
+  #For No9 and No16 seeds
+  ninth_to_sixteenth_positions <- sample(c(16,17,48,49,80,81,112,113), 8)
+  for (i in 1:8) {
+    draw2[ninth_to_sixteenth_positions[i]] <- single_man2$player[single_man2$seed==(i+8)]
+  }
+
+  #For the rest no-seeding players
+  non_seed_positions <- which(is.na(draw2))
+  non_seeds <- single_man2$player[is.na(single_man2$seed)]
+  for (i in 1:length(non_seed_positions)) {
+    draw2[non_seed_positions[i]] <- non_seeds[i]
+  }
+  
+  #The first round result
+  result2 <- split(draw2, ceiling(seq_along(1:128)/2))
+  #first_round <- bind_rows(lapply(result, function(x) data.frame(player1 = x[1], player2 = x[2])))
+  #print(first_round)
+  return(result2)
+}
+```
+
+```{r,message=FALSE,warning=FALSE}
+#implement drawing simulation function 10 times
+set.seed(18)
+draw_n <- 10
+draw2 <- replicate(draw_n, f_draw16(), simplify = FALSE)
+draw2 <- as.data.frame(unlist(draw2))
+colnames(draw2) <- c("player")
+draw2$test <- rep(1:draw_n, each = 128) 
+draw2 <- left_join(draw2, single_man2, by= "player") %>% select(player,seed,points,test)
+```
+
+```{r,message=FALSE,warning=FALSE}
+#implement the simulation 
+set.seed(18)
+result_list2 <- list()
+
+e <- 1.5
+sims <- 10000
+
+blank_results <- c("64" = 0,"32" = 0,"16" = 0,"8" = 0, "4" = 0, "2" = 0, "1" = 0)
+
+
+for (test_num in 1:draw_n) {
+
+  test_players <- draw2[draw2$test == test_num, ]
+  first_round <- test_players$player
+  
+
+  point_dict <- setNames(as.numeric(test_players$points), test_players$Player)
+  
+
+  test_result_dict <- list()
+  for (i in first_round) {
+    test_result_dict[[i]] <- blank_results
+  }
+  
+
+  for (x in 1:sims) {
+    next_round <- first_round
+    while (TRUE) {
+      next_round <- find_round_winners(next_round, point_dict, e)
+      n <- length(next_round)
+      for (p in next_round) {
+        test_result_dict[[p]][as.character(n)] <- test_result_dict[[p]][as.character(n)] + 1
+      }
+      if (n == 1) break
+    }
+  }
+  
+
+  result_list2[[paste("Test", test_num)]] <- test_result_dict
+}
+
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Calculate the probability for every players winning in every round.
+result_table2 <- data.frame(Player = character(), Seeds=numeric(),Key = character(),Points = numeric(), R64 = numeric(), R32 = numeric(), R16 = numeric(), QF = numeric(), SF = numeric(), Final = numeric(), Winnner = numeric())
+
+  for (pl in first_round) {
+    R64 <- c()
+    R32 <- c()
+    R16 <- c()
+    QF <- c()
+    SF <- c()
+    Final <- c()
+    Winner <- c()
+    
+      for (i in 1:draw_n) {
+      sub_result <- result_list2[[i]]
+      
+      R64[i] <- sub_result[[pl]]["64"] / sims
+      R32[i] <- sub_result[[pl]]["32"] / sims
+      R16[i] <- sub_result[[pl]]["16"] / sims
+      QF[i] <- sub_result[[pl]]["8"] / sims
+      SF[i] <- sub_result[[pl]]["4"] / sims
+      Final[i] <- sub_result[[pl]]["2"] / sims
+      Winner[i] <- sub_result[[pl]]["1"] / sims
+      
+      }
+    
+    index <- which(single_man2$player == pl)
+    row <- data.frame( Player = pl,
+             Seeds = single_man2$seed[index],
+             Key = single_man2$Key[index],
+             Points = single_man2$points[index],  
+             R64 = mean(R64),
+             R32 = mean(R32),
+             R16 = mean(R16),
+             QF = mean(QF),
+             SF = mean(SF),
+             Final = mean(Final),
+             Winner = mean(Winner))
+   result_table2 <- rbind(result_table2, row)
+    
+  }  
+
+
+```
+
+```{r,message=FALSE,warning=FALSE}
+#summarize the result of probability for key 
+key16 <- result_table2 %>%
+  group_by(Key) %>%
+  summarise(
+    R64 = mean(R64, na.rm = TRUE),
+    R32 = mean(R32, na.rm = TRUE),
+    R16 = mean(R16, na.rm = TRUE),
+    QF = mean(QF, na.rm = TRUE),
+    SF = mean(SF, na.rm = TRUE),
+    Final = mean(Final, na.rm = TRUE),
+    Winner = mean(Winner, na.rm = TRUE)
+  )
+
+key16 
+```
+
+```{r,message=FALSE,warning=FALSE}
+#summarize the result of top 1 seeded players
+key16_top1 <- result_table2 %>%
+  filter(Seeds==1) 
+
+key16_top1
+```
+
+```{r,message=FALSE,warning=FALSE}
+#Comparison Probability in different system by seed-status
+key16$System <- "16 seeds"
+key32$System <- "32 seeds"
+
+simulation_data <- rbind(key16,key32)
+
+simulation_data <- simulation_data %>%
+  mutate(seed_status = ifelse(grepl("seed", Key), "Seed", "Non-seed"))
+
+simulation_data_long <- simulation_data %>%
+  gather(key = "Round", value = "Probability", -Key, -System, -seed_status)
+
+round_order <- c("R64", "R32", "R16", "QF", "SF", "Final","Winner")
+
+simulation_data_long <- simulation_data_long %>%
+  mutate(Round = factor(Round, levels = round_order))
+
+
+aggregated_data <- simulation_data_long %>%
+  group_by(System,seed_status, Round) %>%
+  summarize(avg_probability = mean(Probability))
+
+aggregated_data
+```
+
+```{r,message=FALSE,warning=FALSE}
+ggplot(aggregated_data, aes(x = Round, y = avg_probability, group = System, color = System)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  geom_text(aes(label = round(avg_probability, 2)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 2.5) +
+  labs(title = "Average Probabilities of Advancing to Different Rounds by Seed Status",
+       x = "Round",
+       y = "Average Probability") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~seed_status) +  
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.55)) 
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+#Comparison Probability in different system for top1 player key16_top1$System <- "16 seeds"
+key32_top1$System<- "32 seeds"
+key16_top1$System<- "16 seeds"
+
+top1_data <- rbind(key16_top1,key32_top1)
+
+top1_data <- top1_data %>% gather(key = "Round", value = "Probability", -Key, -System, -Player)
+
+top1_data <- top1_data %>% mutate(Round = factor(Round, levels = round_order)) 
+top1_data <- top1_data[-c(1:4),]
+top1_data 
+```
+
+
+```{r,message=FALSE,warning=FALSE}
+ggplot(top1_data, aes(x = Round, y = Probability, group = System, color = System)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  geom_text(aes(label = round(Probability, 2)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 2.5) +
+  labs(title = "Probabilities of Advancing to Different Rounds for Sinner J.",
+       x = "Round",
+       y = "Probability") 
+```
+
